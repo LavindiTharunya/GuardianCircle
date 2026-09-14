@@ -19,6 +19,7 @@ import {
   deleteSafeZone,
   calculateDistance,
   updateChildLocation,
+  broadcastChildLiveLocation,
 } from '../../services/parentChildService';
 
 const ZONE_PRESETS = [
@@ -106,7 +107,7 @@ export default function SafeZonesScreen() {
       };
     }
 
-    const updated = await updateChildLocation(
+    const updated = await broadcastChildLiveLocation(
       activeChild.id,
       newCoords,
       `${zone.name} Sector Area`

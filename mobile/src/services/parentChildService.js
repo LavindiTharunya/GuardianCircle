@@ -1,4 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import * as Location from 'expo-location';
 import { db } from './firebase';
 import {
   collection,
@@ -10,13 +11,14 @@ import {
   query,
   where,
   serverTimestamp,
+  onSnapshot,
 } from 'firebase/firestore';
 
 /**
- * TOGGLE: Set to true to strictly prevent Firebase quota consumption during development and testing.
- * When true, all operations read/write from local AsyncStorage and rich realistic mock data.
+ * TOGGLE: Set to false to enable live Firestore synchronization across real devices.
+ * When offline or on permission denial, gracefully falls back to local storage and mock data.
  */
-export const USE_MOCK_DATA = true;
+export const USE_MOCK_DATA = false;
 
 const STORAGE_KEYS = {
   CHILDREN: '@guardiancircle_mock_children_v4',
@@ -586,37 +588,193 @@ async function saveStoredPetsItems(items) {
 }
 
 // ==========================================
+// REAL DEVICE GPS & FIRESTORE TWO-DEVICE UTILITIES
+// ==========================================
+
+/**
+ * Fetch the current physical phone's GPS location using expo-location.
+ * Requests foreground permissions if not already granted.
+ * Gracefully returns fallback error object if denied or unavailable.
+ */
+export async function getCurrentDeviceLocation() {
+  try {
+    const { status } = await Location.requestForegroundPermissionsAsync();
+    if (status !== 'granted') {
+      console.warn('[parentChildService] Location permission denied by user.');
+      return { success: false, error: 'Location permission not granted' };
+    }
+    const loc = await Location.getCurrentPositionAsync({
+      accuracy: Location.Accuracy.Balanced,
+    });
+    let address = '';
+    try {
+      const rev = await Location.reverseGeocodeAsync({
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+      });
+      if (rev && rev.length > 0) {
+        const r = rev[0];
+        const parts = [r.name, r.street, r.district || r.subregion, r.city, r.region].filter(Boolean);
+        address = parts.join(', ');
+      }
+    } catch (e) {
+      // reverse geocoding is optional
+    }
+    return {
+      success: true,
+      coords: {
+        latitude: loc.coords.latitude,
+        longitude: loc.coords.longitude,
+        accuracy: loc.coords.accuracy,
+        speed: loc.coords.speed,
+      },
+      address: address || `Lat: ${loc.coords.latitude.toFixed(4)}, Lon: ${loc.coords.longitude.toFixed(4)}`,
+      timestamp: new Date().toISOString(),
+    };
+  } catch (err) {
+    console.warn('[parentChildService] getCurrentDeviceLocation error:', err);
+    return { success: false, error: err.message };
+  }
+}
+
+/**
+ * Child Device: Broadcasts the child's live GPS coordinates to Firestore.
+ * Also updates local cache and evaluates geofences.
+ */
+export async function broadcastChildLiveLocation(childId, customCoords = null, customAddress = '') {
+  let coords = customCoords;
+  let address = customAddress;
+
+  if (!coords) {
+    const devLoc = await getCurrentDeviceLocation();
+    if (devLoc.success) {
+      coords = devLoc.coords;
+      address = devLoc.address;
+    }
+  }
+
+  if (!coords) {
+    // If real GPS is unavailable, fall back to child's existing coordinates
+    const existingChild = await getChildById(childId);
+    if (!existingChild) return null;
+    coords = existingChild.lastLocation;
+    address = existingChild.lastLocation?.address || '';
+  }
+
+  // 1. Sync to Firestore if db is reachable
+  try {
+    const locDocRef = doc(db, 'childLocations', childId);
+    await setDoc(
+      locDocRef,
+      {
+        childId,
+        latitude: coords.latitude,
+        longitude: coords.longitude,
+        accuracy: coords.accuracy || null,
+        speed: coords.speed ? `${Math.round(coords.speed * 3.6)} km/h` : 'Walking',
+        address: address || 'Live GPS Location',
+        updatedAt: serverTimestamp(),
+        isOnline: true,
+      },
+      { merge: true }
+    );
+  } catch (fsErr) {
+    console.warn('[parentChildService] Firestore broadcast error (graceful fallback):', fsErr);
+  }
+
+  // 2. Update local state and evaluate geofences
+  return await updateChildLocation(childId, coords, address);
+}
+
+/**
+ * Parent Device: Real-time listener for child's live Firestore location.
+ * Triggers onUpdate callback whenever child phone updates coordinates.
+ */
+export function subscribeToChildLiveLocation(childId, onUpdate) {
+  if (!childId) return () => {};
+  try {
+    const locDocRef = doc(db, 'childLocations', childId);
+    const unsubscribe = onSnapshot(
+      locDocRef,
+      async (snap) => {
+        if (snap.exists()) {
+          const data = snap.data();
+          if (data.latitude !== undefined && data.longitude !== undefined) {
+            const updated = await updateChildLocation(
+              childId,
+              { latitude: data.latitude, longitude: data.longitude },
+              data.address || ''
+            );
+            if (onUpdate && updated) {
+              onUpdate({
+                ...updated,
+                sosActive: data.sosActive !== undefined ? data.sosActive : updated.sosActive,
+                isOnline: data.isOnline !== undefined ? data.isOnline : true,
+              });
+            }
+          }
+        }
+      },
+      (err) => {
+        console.warn('[parentChildService] subscribeToChildLiveLocation snapshot warning:', err);
+      }
+    );
+    return unsubscribe;
+  } catch (err) {
+    console.warn('[parentChildService] subscribeToChildLiveLocation error:', err);
+    return () => {};
+  }
+}
+
+// ==========================================
 // SERVICE API METHODS
 // ==========================================
 
 /**
  * Fetch all linked children for the current parent user.
+ * Merges real live coordinates from Firestore childLocations whenever available.
  */
 export async function getChildren(parentUid = 'parent_user_default') {
-  if (USE_MOCK_DATA) {
-    return await getStoredChildren();
+  let stored = await getStoredChildren();
+
+  // Try to sync with real Firestore child locations if online
+  try {
+    const locsSnap = await getDocs(collection(db, 'childLocations'));
+    if (!locsSnap.empty) {
+      const liveLocations = {};
+      locsSnap.forEach((d) => {
+        liveLocations[d.id] = d.data();
+      });
+
+      let updatedAny = false;
+      stored = stored.map((child) => {
+        const live = liveLocations[child.id] || (child.targetUid && liveLocations[child.targetUid]);
+        if (live && live.latitude !== undefined && live.longitude !== undefined) {
+          updatedAny = true;
+          return {
+            ...child,
+            lastLocation: {
+              latitude: live.latitude,
+              longitude: live.longitude,
+              address: live.address || child.lastLocation?.address,
+              timestamp: live.updatedAt?.toDate?.()?.toISOString?.() || new Date().toISOString(),
+            },
+            isOnline: live.isOnline !== undefined ? live.isOnline : true,
+            sosActive: live.sosActive !== undefined ? live.sosActive : child.sosActive,
+          };
+        }
+        return child;
+      });
+
+      if (updatedAny) {
+        await saveStoredChildren(stored);
+      }
+    }
+  } catch (fsErr) {
+    // Gracefully ignore Firestore connectivity failures and return stored children
   }
 
-  try {
-    const q = query(
-      collection(db, 'linkedEntities'),
-      where('ownerUid', '==', parentUid),
-      where('type', '==', 'child'),
-      where('status', '==', 'active')
-    );
-    const snap = await getDocs(q);
-    if (snap.empty) {
-      return await getStoredChildren(); // Graceful fallback
-    }
-    const results = [];
-    snap.forEach((docSnap) => {
-      results.push({ id: docSnap.id, ...docSnap.data() });
-    });
-    return results;
-  } catch (err) {
-    console.warn('[parentChildService] Firestore getChildren fallback:', err);
-    return await getStoredChildren();
-  }
+  return stored;
 }
 
 /**
@@ -845,6 +1003,25 @@ export async function updateChildLocation(childId, coords, address = '') {
   children[index] = updatedChild;
   await saveStoredChildren(children);
 
+  // Sync to Firestore childLocations doc if reachable
+  try {
+    await setDoc(
+      doc(db, 'childLocations', childId),
+      {
+        childId,
+        latitude: newLocation.latitude,
+        longitude: newLocation.longitude,
+        address: newLocation.address,
+        currentZoneName: insideZoneName,
+        updatedAt: serverTimestamp(),
+        isOnline: true,
+      },
+      { merge: true }
+    );
+  } catch (e) {
+    // ignore
+  }
+
   // Automatically record boundary transition events to history timeline
   const history = await getStoredHistory();
   const childEvents = history[childId] || [];
@@ -1016,6 +1193,20 @@ export async function sendCheckInRequest(childId) {
   history[childId] = [newEvent, ...childEvents];
   await saveStoredHistory(history);
 
+  // Sync to Firestore
+  try {
+    await setDoc(
+      doc(db, 'childLocations', childId),
+      {
+        checkInRequested: true,
+        checkInRequestedAt: serverTimestamp(),
+      },
+      { merge: true }
+    );
+  } catch (e) {
+    // ignore
+  }
+
   return { success: true, message: `Check-in request sent to ${child.targetName}!` };
 }
 
@@ -1056,6 +1247,22 @@ export async function childSendCheckIn(childId, customNote = "I'm safe!") {
   history[childId] = [newEvent, ...childEvents];
   await saveStoredHistory(history);
 
+  // Sync to Firestore
+  try {
+    await setDoc(
+      doc(db, 'childLocations', childId),
+      {
+        checkInRequested: false,
+        lastCheckIn: serverTimestamp(),
+        checkInNote: customNote,
+        sosActive: false,
+      },
+      { merge: true }
+    );
+  } catch (e) {
+    // ignore
+  }
+
   return child;
 }
 
@@ -1092,20 +1299,29 @@ export async function triggerChildSOS(childId, triggerSource = 'button') {
   history[childId] = [newEvent, ...childEvents];
   await saveStoredHistory(history);
 
-  if (!USE_MOCK_DATA) {
-    try {
-      await setDoc(doc(db, 'alerts', `child_sos_${Date.now()}`), {
-        type: 'sos',
-        triggeredBy: child.targetUid || child.id,
-        triggerSource,
-        location: child.lastLocation,
-        timestamp: serverTimestamp(),
-        recipients: [child.ownerUid],
-        status: 'active',
-      });
-    } catch (err) {
-      console.warn('[parentChildService] Firestore alert write:', err);
-    }
+  // Sync to Firestore childLocations + alerts collection
+  try {
+    await setDoc(
+      doc(db, 'childLocations', childId),
+      {
+        sosActive: true,
+        sosTimestamp: serverTimestamp(),
+        sosSource: triggerSource,
+      },
+      { merge: true }
+    );
+    await setDoc(doc(db, 'alerts', `child_sos_${Date.now()}`), {
+      type: 'sos',
+      triggeredBy: child.targetUid || child.id,
+      childName: child.targetName,
+      triggerSource,
+      location: child.lastLocation,
+      timestamp: serverTimestamp(),
+      recipients: [child.ownerUid],
+      status: 'active',
+    });
+  } catch (err) {
+    console.warn('[parentChildService] Firestore alert write:', err);
   }
 
   return child;
@@ -1142,6 +1358,20 @@ export async function resolveChildSOS(childId) {
   history[childId] = [newEvent, ...childEvents];
   await saveStoredHistory(history);
 
+  // Sync to Firestore
+  try {
+    await setDoc(
+      doc(db, 'childLocations', childId),
+      {
+        sosActive: false,
+        sosTimestamp: null,
+      },
+      { merge: true }
+    );
+  } catch (err) {
+    console.warn('[parentChildService] Firestore resolve write:', err);
+  }
+
   return child;
 }
 
@@ -1159,9 +1389,8 @@ export async function triggerMockSOS(childId, active = true) {
 // ============================================================================
 // PET & ITEM TRACKING METHODS (SRS FR-5.1–FR-5.4)
 //
-// NOTE: Per SRS Sections 1.2 & 3.6, BLE hardware/ESP32 tag integration is an
-// optional Phase 2 stretch requirement. The following methods provide UI-only
-// simulation stubs without real BLE hardware libraries to comply with the SRS.
+// Pet & valuable profiles (list, add, remove, view) are fully functional.
+// Hardware BLE scanning / pairing is disabled / stubbed for this version.
 // ============================================================================
 
 export async function getPetsAndItems(ownerUid = 'parent_user_default') {
@@ -1169,24 +1398,26 @@ export async function getPetsAndItems(ownerUid = 'parent_user_default') {
 }
 
 /**
- * Simulated add pet or item tag.
+ * Add pet or item profile (Profile data entry).
  */
-export async function simulateAddPetOrItem(ownerUid = 'parent_user_default', data) {
+export async function addPetOrItem(ownerUid = 'parent_user_default', data) {
   if (!data?.name?.trim()) throw new Error('Please enter name');
 
+  const isPet = data.type === 'pet';
   const newItem = {
     id: `tag_${Date.now()}`,
-    type: data.type || 'item',
+    type: data.type || 'pet',
     name: data.name.trim(),
-    tagCode: `GC-BLE-${Math.floor(1000 + Math.random() * 9000)}`,
-    avatarEmoji: data.type === 'pet' ? '🐕' : '🎒',
+    tagCode: `GC-ITEM-${Math.floor(1000 + Math.random() * 9000)}`,
+    avatarEmoji: data.avatarEmoji || (isPet ? '🐕' : '🎒'),
     batteryLevel: 100,
     status: 'in_range',
     rssi: -58,
-    distanceEstimate: '~2.0m away',
+    distanceEstimate: 'Profile Registered (Visual Tag)',
     lastSeen: 'Just now',
-    locationAddress: 'Nearby (Simulated BLE Beacon)',
+    locationAddress: data.locationAddress || 'Registered to Family Profile',
     isRinging: false,
+    notes: data.notes || '',
   };
 
   const items = await getStoredPetsItems();
@@ -1196,9 +1427,9 @@ export async function simulateAddPetOrItem(ownerUid = 'parent_user_default', dat
 }
 
 /**
- * Simulated BLE Proximity toggle (In-Range vs Out-of-Range).
+ * Visual Proximity toggle (In-Range vs Out-of-Range).
  */
-export async function simulateToggleBleProximity(itemId) {
+export async function toggleBleProximity(itemId) {
   const items = await getStoredPetsItems();
   const index = items.findIndex((i) => i.id === itemId);
   if (index === -1) return null;
@@ -1207,7 +1438,7 @@ export async function simulateToggleBleProximity(itemId) {
   const newStatus = item.status === 'in_range' ? 'out_of_range' : 'in_range';
   item.status = newStatus;
   item.rssi = newStatus === 'in_range' ? -52 : -96;
-  item.distanceEstimate = newStatus === 'in_range' ? '~3.0m away' : 'Out of range';
+  item.distanceEstimate = newStatus === 'in_range' ? '~3.0m away (Visual)' : 'Out of range';
   item.lastSeen = 'Just now';
 
   items[index] = item;
@@ -1216,9 +1447,9 @@ export async function simulateToggleBleProximity(itemId) {
 }
 
 /**
- * Simulated audible buzzer ping on BLE tag.
+ * Visual audible buzzer ping stub.
  */
-export async function simulatePingBleTag(itemId) {
+export async function pingBleTag(itemId) {
   const items = await getStoredPetsItems();
   const index = items.findIndex((i) => i.id === itemId);
   if (index === -1) return null;
@@ -1244,9 +1475,9 @@ export async function simulatePingBleTag(itemId) {
 }
 
 /**
- * Simulated remove pet/item tag.
+ * Remove pet/item profile.
  */
-export async function simulateDeletePetOrItem(itemId) {
+export async function deletePetOrItem(itemId) {
   const items = await getStoredPetsItems();
   const filtered = items.filter((i) => i.id !== itemId);
   await saveStoredPetsItems(filtered);
@@ -1254,8 +1485,9 @@ export async function simulateDeletePetOrItem(itemId) {
 }
 
 // Aliases for backward compatibility
-export const addPetOrItem = simulateAddPetOrItem;
-export const toggleBleProximity = simulateToggleBleProximity;
-export const pingBleTag = simulatePingBleTag;
-export const deletePetOrItem = simulateDeletePetOrItem;
+export const simulateAddPetOrItem = addPetOrItem;
+export const simulateToggleBleProximity = toggleBleProximity;
+export const simulatePingBleTag = pingBleTag;
+export const simulateDeletePetOrItem = deletePetOrItem;
+
 

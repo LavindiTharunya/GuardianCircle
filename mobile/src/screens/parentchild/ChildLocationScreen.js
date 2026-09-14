@@ -15,6 +15,8 @@ import { COLORS, SHADOWS, RADIUS, SPACING, TYPOGRAPHY } from '../../constants/th
 import {
   getChildren,
   updateChildLocation,
+  broadcastChildLiveLocation,
+  subscribeToChildLiveLocation,
   sendCheckInRequest,
   triggerMockSOS,
 } from '../../services/parentChildService';
@@ -68,11 +70,24 @@ export default function ChildLocationScreen() {
     loadData();
   }, [loadData]);
 
-  // Periodic polling every 4 seconds to sync live coordinates and SOS state
+  // Real-time Firestore subscriber for the selected child's live GPS coordinates
+  useEffect(() => {
+    if (!selectedChildId) return;
+    const unsubscribe = subscribeToChildLiveLocation(selectedChildId, (liveChild) => {
+      setChildrenList((prev) =>
+        prev.map((c) => (c.id === selectedChildId ? { ...c, ...liveChild } : c))
+      );
+    });
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [selectedChildId]);
+
+  // Periodic polling fallback every 5 seconds to sync data
   useEffect(() => {
     const interval = setInterval(() => {
       loadData();
-    }, 4000);
+    }, 5000);
     return () => clearInterval(interval);
   }, [loadData]);
 
@@ -124,7 +139,7 @@ export default function ChildLocationScreen() {
       longitude: (activeChild.lastLocation?.longitude || 79.8732) + randomOffsetLon,
     };
 
-    const updated = await updateChildLocation(
+    const updated = await broadcastChildLiveLocation(
       activeChild.id,
       newCoords,
       `Updated Location near Sector ${Math.floor(Math.random() * 10 + 1)}`

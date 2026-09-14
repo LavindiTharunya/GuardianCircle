@@ -17,6 +17,8 @@ import {
   resolveChildSOS,
   childSendCheckIn,
   updateChildLocation,
+  broadcastChildLiveLocation,
+  getCurrentDeviceLocation,
 } from '../../services/parentChildService';
 
 export default function ChildDeviceModal({ visible, child, onClose, onStateChange }) {
@@ -24,7 +26,10 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
   const [sosActive, setSosActive] = useState(child?.sosActive || false);
   const [loading, setLoading] = useState(false);
   const [simulatingMove, setSimulatingMove] = useState(false);
+  const [gpsBroadcasting, setGpsBroadcasting] = useState(false);
+  const [liveGpsInfo, setLiveGpsInfo] = useState(null);
   const timerRef = useRef(null);
+  const broadcastIntervalRef = useRef(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
   useEffect(() => {
@@ -32,6 +37,46 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
       setSosActive(child.sosActive || false);
     }
   }, [child]);
+
+  // Live real GPS auto-broadcaster when Child Device view is open
+  useEffect(() => {
+    if (!visible || !child?.id) {
+      if (broadcastIntervalRef.current) {
+        clearInterval(broadcastIntervalRef.current);
+        broadcastIntervalRef.current = null;
+      }
+      return;
+    }
+
+    // Immediately trigger initial GPS broadcast
+    handleBroadcastCurrentGPS();
+
+    // Auto-broadcast live GPS to Firestore every 6 seconds
+    broadcastIntervalRef.current = setInterval(() => {
+      handleBroadcastCurrentGPS();
+    }, 6000);
+
+    return () => {
+      if (broadcastIntervalRef.current) {
+        clearInterval(broadcastIntervalRef.current);
+        broadcastIntervalRef.current = null;
+      }
+    };
+  }, [visible, child?.id]);
+
+  async function handleBroadcastCurrentGPS() {
+    if (!child?.id) return;
+    try {
+      const devLoc = await getCurrentDeviceLocation();
+      if (devLoc.success) {
+        setLiveGpsInfo(devLoc);
+        await broadcastChildLiveLocation(child.id, devLoc.coords, devLoc.address);
+        if (onStateChange) onStateChange();
+      }
+    } catch (e) {
+      // Graceful fallback
+    }
+  }
 
   // Pulsing animation when SOS is active
   useEffect(() => {
@@ -59,6 +104,7 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
   useEffect(() => {
     return () => {
       if (timerRef.current) clearInterval(timerRef.current);
+      if (broadcastIntervalRef.current) clearInterval(broadcastIntervalRef.current);
     };
   }, []);
 
@@ -96,6 +142,11 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
   async function executeChildSOS() {
     setLoading(true);
     try {
+      // Capture live GPS coordinates immediately
+      const devLoc = await getCurrentDeviceLocation();
+      if (devLoc.success) {
+        await broadcastChildLiveLocation(child.id, devLoc.coords, devLoc.address);
+      }
       await triggerChildSOS(child.id, 'Child Device Emergency Button');
       setSosActive(true);
       Vibration.vibrate([0, 500, 200, 500]);
@@ -125,15 +176,42 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
   async function handleSendSafeCheckIn() {
     setLoading(true);
     try {
+      // Broadcast live real GPS on check-in
+      const devLoc = await getCurrentDeviceLocation();
+      if (devLoc.success) {
+        await broadcastChildLiveLocation(child.id, devLoc.coords, devLoc.address);
+      }
       await childSendCheckIn(child.id, "I'm safe and at my designated area!");
       setSosActive(false);
       Vibration.vibrate(100);
-      Alert.alert('✅ Check-in Sent', 'Your check-in confirmation was sent to your Parent Guardian.');
+      Alert.alert('✅ Check-in Sent', 'Your check-in confirmation and real GPS location were sent to your Parent Guardian.');
       if (onStateChange) onStateChange();
     } catch (err) {
       Alert.alert('Error', err.message || 'Failed to send check-in.');
     } finally {
       setLoading(false);
+    }
+  }
+
+  async function handleManualGpsPing() {
+    setGpsBroadcasting(true);
+    try {
+      const devLoc = await getCurrentDeviceLocation();
+      if (devLoc.success) {
+        setLiveGpsInfo(devLoc);
+        await broadcastChildLiveLocation(child.id, devLoc.coords, devLoc.address);
+        if (onStateChange) onStateChange();
+        Alert.alert(
+          '🛰️ Real GPS Broadcast Sent',
+          `Coordinates: ${devLoc.coords.latitude.toFixed(5)}, ${devLoc.coords.longitude.toFixed(5)}\nAddress: ${devLoc.address}`
+        );
+      } else {
+        Alert.alert('GPS Status', devLoc.error || 'Unable to acquire satellite GPS. Using cached location.');
+      }
+    } catch (err) {
+      Alert.alert('GPS Error', 'Failed to broadcast GPS location.');
+    } finally {
+      setGpsBroadcasting(false);
     }
   }
 
@@ -148,7 +226,7 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
         longitude: (child.lastLocation?.longitude || 79.8732) + lonOffset,
       };
 
-      const result = await updateChildLocation(
+      const result = await broadcastChildLiveLocation(
         child.id,
         newCoords,
         `Sector Road near Colombo (${Math.floor(Math.random() * 50 + 1)})`
@@ -284,6 +362,33 @@ export default function ChildDeviceModal({ visible, child, onClose, onStateChang
                 </View>
                 <Text style={styles.statusVal}>{child.speed || 'Stationary'}</Text>
               </View>
+            </View>
+
+            {/* Real Device Satellite GPS Broadcast Card */}
+            <View style={styles.liveGpsCard}>
+              <View style={styles.liveGpsHeader}>
+                <Text style={styles.liveGpsIcon}>🛰️</Text>
+                <View style={styles.liveGpsTitleCol}>
+                  <Text style={styles.liveGpsTitle}>Physical Device Real GPS</Text>
+                  <Text style={styles.liveGpsSub}>
+                    {liveGpsInfo
+                      ? `Live GPS: ${liveGpsInfo.coords.latitude.toFixed(4)}, ${liveGpsInfo.coords.longitude.toFixed(4)}`
+                      : 'Live broadcast to Firestore active (every 6s)'}
+                  </Text>
+                </View>
+              </View>
+              <TouchableOpacity
+                style={styles.gpsSyncBtn}
+                onPress={handleManualGpsPing}
+                disabled={gpsBroadcasting}
+                activeOpacity={0.8}
+              >
+                {gpsBroadcasting ? (
+                  <ActivityIndicator color="#38BDF8" size="small" />
+                ) : (
+                  <Text style={styles.gpsSyncBtnText}>📡 Broadcast Current Phone GPS Now</Text>
+                )}
+              </TouchableOpacity>
             </View>
 
             {/* Child Actions */}
@@ -623,5 +728,49 @@ const styles = StyleSheet.create({
     color: '#F8FAFC',
     fontWeight: '600',
     fontSize: 13,
+  },
+  liveGpsCard: {
+    backgroundColor: '#1E293B',
+    borderRadius: RADIUS.md,
+    padding: SPACING.md,
+    marginBottom: SPACING.lg,
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+  },
+  liveGpsHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    marginBottom: SPACING.sm,
+  },
+  liveGpsIcon: {
+    fontSize: 24,
+  },
+  liveGpsTitleCol: {
+    flex: 1,
+  },
+  liveGpsTitle: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#38BDF8',
+  },
+  liveGpsSub: {
+    fontSize: 11,
+    color: '#94A3B8',
+    marginTop: 2,
+  },
+  gpsSyncBtn: {
+    backgroundColor: '#0F172A',
+    borderWidth: 1,
+    borderColor: '#38BDF8',
+    paddingVertical: 10,
+    borderRadius: RADIUS.md,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  gpsSyncBtnText: {
+    color: '#38BDF8',
+    fontSize: 12,
+    fontWeight: '700',
   },
 });

@@ -12,48 +12,48 @@ import {
 } from 'react-native';
 import { COLORS, SHADOWS, RADIUS, SPACING, TYPOGRAPHY } from '../../constants/theme';
 import {
-  simulateToggleBleProximity,
-  simulatePingBleTag,
-  simulateAddPetOrItem,
-  simulateDeletePetOrItem,
+  toggleBleProximity,
+  addPetOrItem,
+  deletePetOrItem,
 } from '../../services/parentChildService';
+
+const EMOJI_OPTIONS = {
+  pet: ['🐕', '🐈', '🦜', '🐰', '🐢', '🐾'],
+  item: ['🎒', '🔑', '💼', '💻', '🚲', '🏷️'],
+};
 
 export default function PetItemSection({ items = [], onRefresh }) {
   const [expanded, setExpanded] = useState(true);
   const [modalVisible, setModalVisible] = useState(false);
   const [tagName, setTagName] = useState('');
   const [tagType, setTagType] = useState('pet'); // 'pet' | 'item'
+  const [selectedEmoji, setSelectedEmoji] = useState('🐕');
   const [loading, setLoading] = useState(false);
 
   async function handleToggleProximity(itemId) {
-    await simulateToggleBleProximity(itemId);
+    await toggleBleProximity(itemId);
     if (onRefresh) onRefresh();
   }
 
-  async function handleRingTag(item) {
-    if (item.status === 'out_of_range') {
-      Alert.alert(
-        'Out of BLE Range',
-        `${item.name} is currently out of Bluetooth range. Proximity beep cannot be sent until in range.`
-      );
-      return;
-    }
-    await simulatePingBleTag(item.id);
-    if (onRefresh) onRefresh();
-    Alert.alert('🔔 BLE Tag Triggered', `Buzzer activated on ${item.name} for 4 seconds!`);
-  }
-
-  async function handleDeleteTag(item) {
+  function handleBlePairingPress() {
     Alert.alert(
-      'Unpair Tag',
+      'BLE Pairing Not Available',
+      'Hardware BLE tag scanning & pairing is out of scope for this version. Pet and valuable profiles can be managed and viewed directly.',
+      [{ text: 'Understood' }]
+    );
+  }
+
+  async function handleDeleteProfile(item) {
+    Alert.alert(
+      'Remove Profile',
       `Are you sure you want to remove "${item.name}"?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Unpair',
+          text: 'Remove',
           style: 'destructive',
           onPress: async () => {
-            await simulateDeletePetOrItem(item.id);
+            await deletePetOrItem(item.id);
             if (onRefresh) onRefresh();
           },
         },
@@ -61,22 +61,23 @@ export default function PetItemSection({ items = [], onRefresh }) {
     );
   }
 
-  async function handleAddTag() {
+  async function handleAddProfile() {
     if (!tagName.trim()) {
-      Alert.alert('Required', 'Please enter a name for the pet or item.');
+      Alert.alert('Required', 'Please enter a name for the pet or valuable item.');
       return;
     }
     setLoading(true);
     try {
-      await simulateAddPetOrItem('parent_user_default', {
+      await addPetOrItem('parent_user_default', {
         name: tagName.trim(),
         type: tagType,
+        avatarEmoji: selectedEmoji,
       });
       setTagName('');
       setModalVisible(false);
       if (onRefresh) onRefresh();
     } catch (err) {
-      Alert.alert('Error', err.message || 'Failed to add BLE tag.');
+      Alert.alert('Error', err.message || 'Failed to add profile.');
     } finally {
       setLoading(false);
     }
@@ -93,7 +94,7 @@ export default function PetItemSection({ items = [], onRefresh }) {
         <View style={styles.headerLeft}>
           <Text style={styles.headerTitle}>🐾 Tracked Pets & Valuables</Text>
           <View style={styles.tagCountBadge}>
-            <Text style={styles.tagCountText}>{items.length} tags</Text>
+            <Text style={styles.tagCountText}>{items.length} profiles</Text>
           </View>
         </View>
         <Text style={styles.expandIcon}>{expanded ? '▲' : '▼'}</Text>
@@ -101,15 +102,15 @@ export default function PetItemSection({ items = [], onRefresh }) {
 
       {expanded && (
         <View style={styles.body}>
-          {/* Phase 2 BLE Simulation Notice */}
-          <View style={styles.phase2Notice}>
-            <Text style={styles.phase2NoticeText}>
-              ⚙️ SRS Phase 2: UI-Only Simulation Stubs (Zero BLE hardware required)
+          {/* Phase Notice */}
+          <View style={styles.phaseNotice}>
+            <Text style={styles.phaseNoticeText}>
+              🏷️ Pet & Valuable Profiles: Profile Management Active
             </Text>
           </View>
 
           <Text style={styles.sectionSubtitle}>
-            Simulated BLE Proximity Beacon tags for pet collars, backpacks, and keys.
+            Tracked profiles for household pets, school backpacks, and keys.
           </Text>
 
           {items.map((item) => {
@@ -118,7 +119,7 @@ export default function PetItemSection({ items = [], onRefresh }) {
               <View key={item.id} style={styles.itemCard}>
                 <View style={styles.itemTopRow}>
                   <View style={styles.iconCircle}>
-                    <Text style={styles.itemEmoji}>{item.avatarEmoji || '🏷️'}</Text>
+                    <Text style={styles.itemEmoji}>{item.avatarEmoji || (item.type === 'pet' ? '🐕' : '🎒')}</Text>
                   </View>
 
                   <View style={styles.itemDetails}>
@@ -146,12 +147,12 @@ export default function PetItemSection({ items = [], onRefresh }) {
                             { color: inRange ? COLORS.safeGreen : COLORS.warnOrange },
                           ]}
                         >
-                          {inRange ? '🟢 In Range (Simulated BLE)' : '⚪ Out of Range'}
+                          {inRange ? '🟢 In Range (Visual)' : '⚪ Out of Range'}
                         </Text>
                       </View>
 
                       <Text style={styles.distanceText}>
-                        {inRange ? `${item.distanceEstimate} (${item.rssi} dBm)` : 'Out of range'}
+                        {item.type === 'pet' ? 'Pet Profile' : 'Valuable Profile'}
                       </Text>
                     </View>
                   </View>
@@ -159,43 +160,30 @@ export default function PetItemSection({ items = [], onRefresh }) {
 
                 <View style={styles.locationBar}>
                   <Text style={styles.locationText} numberOfLines={1}>
-                    📍 {item.locationAddress} • 🔋 {item.batteryLevel}%
+                    📍 {item.locationAddress} • 🔋 {item.batteryLevel || 100}%
                   </Text>
                 </View>
 
                 {/* Actions */}
                 <View style={styles.itemActionRow}>
+                  {/* Disabled Hardware BLE Pair Button with informative tag */}
                   <TouchableOpacity
-                    style={[
-                      styles.ringBtn,
-                      item.isRinging && styles.ringBtnActive,
-                      !inRange && styles.ringBtnDisabled,
-                    ]}
-                    onPress={() => handleRingTag(item)}
+                    style={[styles.actionBtn, styles.blePairDisabledBtn]}
+                    onPress={handleBlePairingPress}
                     activeOpacity={0.7}
                   >
-                    <Text style={styles.ringBtnText}>
-                      {item.isRinging ? '🔊 Beeping...' : '🔔 Ring Tag'}
+                    <Text style={styles.blePairDisabledText}>
+                      🔒 BLE Pairing: Not available yet
                     </Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
-                    style={styles.simulateBtn}
-                    onPress={() => handleToggleProximity(item.id)}
+                    style={[styles.actionBtn, styles.removeBtn]}
+                    onPress={() => handleDeleteProfile(item)}
                     activeOpacity={0.7}
                   >
-                    <Text style={styles.simulateBtnText}>
-                      {inRange ? 'Simulate Exit' : 'Simulate Enter'}
-                    </Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={[styles.simulateBtn, { backgroundColor: '#FEE2E2', borderColor: '#FECACA' }]}
-                    onPress={() => handleDeleteTag(item)}
-                    activeOpacity={0.7}
-                  >
-                    <Text style={[styles.simulateBtnText, { color: '#DC2626' }]}>
-                      Unpair
+                    <Text style={styles.removeBtnText}>
+                      ✕ Remove
                     </Text>
                   </TouchableOpacity>
                 </View>
@@ -205,42 +193,71 @@ export default function PetItemSection({ items = [], onRefresh }) {
 
           <TouchableOpacity
             style={styles.addTagBtn}
-            onPress={() => setModalVisible(true)}
+            onPress={() => {
+              setSelectedEmoji(tagType === 'pet' ? '🐕' : '🎒');
+              setModalVisible(true);
+            }}
             activeOpacity={0.8}
           >
-            <Text style={styles.addTagBtnText}>+ Add Simulated Pet / Item BLE Tag</Text>
+            <Text style={styles.addTagBtnText}>+ Add New Pet or Valuable Profile</Text>
           </TouchableOpacity>
         </View>
       )}
 
-      {/* Modal to register new BLE tag */}
+      {/* Modal to register new pet/valuable profile */}
       <Modal visible={modalVisible} animationType="fade" transparent onRequestClose={() => setModalVisible(false)}>
         <View style={styles.modalBg}>
           <View style={styles.modalBox}>
-            <Text style={styles.modalTitle}>Pair BLE Beacon Tag</Text>
+            <Text style={styles.modalTitle}>Add Pet or Valuable Profile</Text>
             <Text style={styles.modalSub}>
-              Attach a GuardianCircle BLE tag to your pet's collar or personal valuables.
+              Create a profile to monitor household pets or important personal items.
             </Text>
+
+            <View style={styles.hardwareNoteBox}>
+              <Text style={styles.hardwareNoteText}>
+                ℹ️ Data-entry profile only. Real BLE hardware pairing is not available in this version.
+              </Text>
+            </View>
 
             <View style={styles.typeSwitchRow}>
               <TouchableOpacity
                 style={[styles.typeBtn, tagType === 'pet' && styles.typeBtnActive]}
-                onPress={() => setTagType('pet')}
+                onPress={() => {
+                  setTagType('pet');
+                  setSelectedEmoji('🐕');
+                }}
               >
                 <Text style={styles.typeBtnText}>🐕 Pet (Dog/Cat)</Text>
               </TouchableOpacity>
               <TouchableOpacity
                 style={[styles.typeBtn, tagType === 'item' && styles.typeBtnActive]}
-                onPress={() => setTagType('item')}
+                onPress={() => {
+                  setTagType('item');
+                  setSelectedEmoji('🎒');
+                }}
               >
                 <Text style={styles.typeBtnText}>🎒 Valuables / Bag</Text>
               </TouchableOpacity>
             </View>
 
-            <Text style={styles.label}>Tag Name</Text>
+            {/* Emoji Avatar Selector */}
+            <Text style={styles.label}>Select Avatar Icon</Text>
+            <View style={styles.emojiPickerRow}>
+              {(EMOJI_OPTIONS[tagType] || EMOJI_OPTIONS.pet).map((emoji) => (
+                <TouchableOpacity
+                  key={emoji}
+                  style={[styles.emojiBtn, selectedEmoji === emoji && styles.emojiBtnSelected]}
+                  onPress={() => setSelectedEmoji(emoji)}
+                >
+                  <Text style={styles.emojiText}>{emoji}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <Text style={styles.label}>Profile Name</Text>
             <TextInput
               style={styles.input}
-              placeholder={tagType === 'pet' ? 'e.g. Bella (Puppy)' : 'e.g. Laptop Sleeve'}
+              placeholder={tagType === 'pet' ? 'e.g. Bella (Puppy)' : 'e.g. School Backpack'}
               placeholderTextColor={COLORS.textMuted}
               value={tagName}
               onChangeText={setTagName}
@@ -256,13 +273,13 @@ export default function PetItemSection({ items = [], onRefresh }) {
 
               <TouchableOpacity
                 style={styles.saveModalBtn}
-                onPress={handleAddTag}
+                onPress={handleAddProfile}
                 disabled={loading}
               >
                 {loading ? (
                   <ActivityIndicator color="#FFF" />
                 ) : (
-                  <Text style={styles.saveModalBtnText}>Pair Beacon</Text>
+                  <Text style={styles.saveModalBtnText}>Save Profile</Text>
                 )}
               </TouchableOpacity>
             </View>
@@ -318,17 +335,17 @@ const styles = StyleSheet.create({
   body: {
     marginTop: SPACING.md,
   },
-  phase2Notice: {
+  phaseNotice: {
     backgroundColor: '#EFF6FF',
     borderWidth: 1,
     borderColor: '#BFDBFE',
     borderRadius: RADIUS.sm,
-    paddingVertical: 5,
-    paddingHorizontal: 8,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
     marginBottom: SPACING.sm,
   },
-  phase2NoticeText: {
-    fontSize: 10,
+  phaseNoticeText: {
+    fontSize: 11,
     fontWeight: '700',
     color: '#1D4ED8',
   },
@@ -417,35 +434,33 @@ const styles = StyleSheet.create({
     gap: 8,
     marginTop: SPACING.sm,
   },
-  ringBtn: {
-    flex: 1.2,
-    backgroundColor: COLORS.infoBlueLight,
-    paddingVertical: 7,
+  actionBtn: {
+    paddingVertical: 8,
     borderRadius: RADIUS.sm,
     alignItems: 'center',
+    justifyContent: 'center',
   },
-  ringBtnActive: {
-    backgroundColor: '#FFE082',
+  blePairDisabledBtn: {
+    flex: 1.8,
+    backgroundColor: '#F1F5F9',
+    borderWidth: 1,
+    borderColor: '#CBD5E1',
   },
-  ringBtnDisabled: {
-    opacity: 0.5,
-  },
-  ringBtnText: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: COLORS.infoBlue,
-  },
-  simulateBtn: {
-    flex: 1,
-    backgroundColor: '#EAECEF',
-    paddingVertical: 7,
-    borderRadius: RADIUS.sm,
-    alignItems: 'center',
-  },
-  simulateBtnText: {
+  blePairDisabledText: {
     fontSize: 11,
     fontWeight: '600',
-    color: COLORS.textPrimary,
+    color: '#64748B',
+  },
+  removeBtn: {
+    flex: 1,
+    backgroundColor: '#FEE2E2',
+    borderWidth: 1,
+    borderColor: '#FECACA',
+  },
+  removeBtnText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#DC2626',
   },
   addTagBtn: {
     borderWidth: 1.5,
@@ -484,7 +499,20 @@ const styles = StyleSheet.create({
   modalSub: {
     fontSize: 12,
     color: COLORS.textSecondary,
+    marginBottom: SPACING.sm,
+  },
+  hardwareNoteBox: {
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    borderRadius: RADIUS.sm,
+    padding: SPACING.sm,
     marginBottom: SPACING.md,
+  },
+  hardwareNoteText: {
+    fontSize: 11,
+    color: '#475569',
+    lineHeight: 16,
   },
   typeSwitchRow: {
     flexDirection: 'row',
@@ -508,11 +536,34 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.textPrimary,
   },
+  emojiPickerRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginBottom: SPACING.md,
+  },
+  emojiBtn: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#F8FAFC',
+    borderWidth: 1,
+    borderColor: '#E2E8F0',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  emojiBtnSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primaryLight,
+    borderWidth: 2,
+  },
+  emojiText: {
+    fontSize: 22,
+  },
   label: {
     fontSize: 12,
     fontWeight: '600',
     color: COLORS.textPrimary,
-    marginBottom: 4,
+    marginBottom: 6,
   },
   input: {
     backgroundColor: '#F8F9FA',

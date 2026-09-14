@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   TouchableOpacity,
   ActivityIndicator,
   Alert,
+  Platform,
 } from 'react-native';
 import { useNavigation, useFocusEffect } from '@react-navigation/native';
 import { COLORS, SHADOWS, RADIUS, SPACING, TYPOGRAPHY } from '../../constants/theme';
@@ -29,11 +30,13 @@ import PetItemSection from '../../components/parentchild/PetItemSection';
 
 export default function ParentDashboardScreen() {
   const navigation = useNavigation();
+  const scrollRef = useRef(null);
 
   const [childrenList, setChildrenList] = useState([]);
   const [petsItemsList, setPetsItemsList] = useState([]);
   const [loading, setLoading] = useState(true);
   const [refreshing, setRefreshing] = useState(false);
+  const [activeTab, setActiveTab] = useState('all'); // 'all' | 'children' | 'pets'
   const [modalVisible, setModalVisible] = useState(false);
   const [childDeviceVisible, setChildDeviceVisible] = useState(false);
   const [selectedDeviceChild, setSelectedDeviceChild] = useState(null);
@@ -59,10 +62,10 @@ export default function ParentDashboardScreen() {
 
   // Periodic polling every 4 seconds to sync live child location, check-ins, and SOS alerts
   useEffect(() => {
-    const interval = setInterval(() => {
+    const timer = setInterval(() => {
       loadData();
     }, 4000);
-    return () => clearInterval(interval);
+    return () => clearInterval(timer);
   }, [loadData]);
 
   async function handleRefresh() {
@@ -71,17 +74,14 @@ export default function ParentDashboardScreen() {
   }
 
   async function handleToggleSOS(child) {
-    const newState = !child.sosActive;
-    await triggerMockSOS(child.id, newState);
-    await loadData();
-    if (newState) {
-      Alert.alert(
-        '🚨 Emergency SOS Triggered',
-        `High-priority alert broadcasted for ${child.targetName}! Parent push notification and GPS broadcast activated.`
-      );
+    if (child.sosActive) {
+      await resolveChildSOS(child.id);
+      Alert.alert('SOS Resolved', `Emergency alert cleared for ${child.targetName}.`);
     } else {
-      Alert.alert('✅ SOS Resolved', `Emergency alert for ${child.targetName} marked as safe.`);
+      await triggerMockSOS(child.id);
+      Alert.alert('🚨 Mock SOS Active', `Emergency triggered for ${child.targetName}!`);
     }
+    await loadData();
   }
 
   function handleOpenChildDevice(child) {
@@ -89,10 +89,10 @@ export default function ParentDashboardScreen() {
     setChildDeviceVisible(true);
   }
 
-  function handleUnlinkChild(child) {
+  async function handleUnlinkChild(child) {
     Alert.alert(
       'Unlink Child',
-      `Are you sure you want to unlink ${child.targetName} from your GuardianCircle? Location tracking and SOS routing will stop.`,
+      `Are you sure you want to remove ${child.targetName} from your dashboard?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -113,16 +113,22 @@ export default function ParentDashboardScreen() {
   return (
     <View style={styles.screenWrapper}>
       <ScrollView
-        style={styles.container}
+        ref={scrollRef}
+        style={[
+          styles.container,
+          Platform.OS === 'web' && { height: '100vh', overflowY: 'auto' },
+        ]}
         contentContainerStyle={styles.scrollContent}
         refreshControl={
-          <RefreshControl
-            refreshing={refreshing}
-            onRefresh={handleRefresh}
-            colors={[COLORS.primary]}
-          />
+          Platform.OS !== 'web' ? (
+            <RefreshControl
+              refreshing={refreshing}
+              onRefresh={handleRefresh}
+              colors={[COLORS.primary]}
+            />
+          ) : undefined
         }
-        showsVerticalScrollIndicator={false}
+        showsVerticalScrollIndicator={true}
       >
         {/* Header Hero */}
         <View style={styles.headerHero}>
@@ -191,62 +197,109 @@ export default function ParentDashboardScreen() {
             <Text style={styles.quickLabel}>History</Text>
             <Text style={styles.quickSub}>Daily timeline</Text>
           </TouchableOpacity>
-        </View>
 
-        {/* Linked Children Section */}
-        <View style={styles.sectionHeaderRow}>
-          <Text style={styles.sectionHeader}>Monitored Children ({childrenList.length})</Text>
-          <TouchableOpacity onPress={() => setModalVisible(true)}>
-            <Text style={styles.linkText}>+ Link New</Text>
+          <TouchableOpacity
+            style={[styles.quickCard, activeTab === 'pets' && styles.quickCardActive]}
+            onPress={() => setActiveTab(activeTab === 'pets' ? 'all' : 'pets')}
+            activeOpacity={0.7}
+          >
+            <Text style={styles.quickEmoji}>🐾</Text>
+            <Text style={styles.quickLabel}>Pet Tags</Text>
+            <Text style={styles.quickSub}>BLE Beacons</Text>
           </TouchableOpacity>
         </View>
 
-        {loading ? (
-          <View style={styles.loadingBox}>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Syncing linked children...</Text>
-          </View>
-        ) : childrenList.length === 0 ? (
-          <View style={styles.emptyCard}>
-            <Text style={styles.emptyEmoji}>👶</Text>
-            <Text style={styles.emptyTitle}>No Children Linked Yet</Text>
-            <Text style={styles.emptySub}>
-              Link your child's phone with a 6-digit code or create a managed profile to monitor their location.
+        {/* Category Tabs: All / Children / Pets */}
+        <View style={styles.tabContainer}>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'all' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('all')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabBtnText, activeTab === 'all' && styles.tabBtnTextActive]}>
+              📋 All ({childrenList.length + petsItemsList.length})
             </Text>
-            <TouchableOpacity
-              style={styles.emptyBtn}
-              onPress={() => setModalVisible(true)}
-              activeOpacity={0.8}
-            >
-              <Text style={styles.emptyBtnText}>+ Add First Child</Text>
-            </TouchableOpacity>
-          </View>
-        ) : (
-          childrenList.map((child) => (
-            <ChildCard
-              key={child.id}
-              child={child}
-              onPress={() =>
-                navigation.navigate(ROUTES.CHILD_LOCATION, { childId: child.id })
-              }
-              onNavigateLocation={() =>
-                navigation.navigate(ROUTES.CHILD_LOCATION, { childId: child.id })
-              }
-              onNavigateSafeZones={() =>
-                navigation.navigate(ROUTES.SAFE_ZONES, { childId: child.id })
-              }
-              onNavigateHistory={() =>
-                navigation.navigate(ROUTES.CHILD_HISTORY, { childId: child.id })
-              }
-              onOpenChildDevice={() => handleOpenChildDevice(child)}
-              onUnlink={() => handleUnlinkChild(child)}
-              onToggleSOS={() => handleToggleSOS(child)}
-            />
-          ))
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'children' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('children')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabBtnText, activeTab === 'children' && styles.tabBtnTextActive]}>
+              👶 Children ({childrenList.length})
+            </Text>
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={[styles.tabBtn, activeTab === 'pets' && styles.tabBtnActive]}
+            onPress={() => setActiveTab('pets')}
+            activeOpacity={0.7}
+          >
+            <Text style={[styles.tabBtnText, activeTab === 'pets' && styles.tabBtnTextActive]}>
+              🐾 Pets & Valuables ({petsItemsList.length})
+            </Text>
+          </TouchableOpacity>
+        </View>
+
+        {/* Linked Children Section (shown if activeTab is 'all' or 'children') */}
+        {(activeTab === 'all' || activeTab === 'children') && (
+          <>
+            <View style={styles.sectionHeaderRow}>
+              <Text style={styles.sectionHeader}>Monitored Children ({childrenList.length})</Text>
+              <TouchableOpacity onPress={() => setModalVisible(true)}>
+                <Text style={styles.linkText}>+ Link New</Text>
+              </TouchableOpacity>
+            </View>
+
+            {loading ? (
+              <View style={styles.loadingBox}>
+                <ActivityIndicator size="large" color={COLORS.primary} />
+                <Text style={styles.loadingText}>Syncing linked children...</Text>
+              </View>
+            ) : childrenList.length === 0 ? (
+              <View style={styles.emptyCard}>
+                <Text style={styles.emptyEmoji}>👶</Text>
+                <Text style={styles.emptyTitle}>No Children Linked Yet</Text>
+                <Text style={styles.emptySub}>
+                  Link your child's phone with a 6-digit code or create a managed profile to monitor their location.
+                </Text>
+                <TouchableOpacity
+                  style={styles.emptyBtn}
+                  onPress={() => setModalVisible(true)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.emptyBtnText}>+ Add First Child</Text>
+                </TouchableOpacity>
+              </View>
+            ) : (
+              childrenList.map((child) => (
+                <ChildCard
+                  key={child.id}
+                  child={child}
+                  onPress={() =>
+                    navigation.navigate(ROUTES.CHILD_LOCATION, { childId: child.id })
+                  }
+                  onNavigateLocation={() =>
+                    navigation.navigate(ROUTES.CHILD_LOCATION, { childId: child.id })
+                  }
+                  onNavigateSafeZones={() =>
+                    navigation.navigate(ROUTES.SAFE_ZONES, { childId: child.id })
+                  }
+                  onNavigateHistory={() =>
+                    navigation.navigate(ROUTES.CHILD_HISTORY, { childId: child.id })
+                  }
+                  onOpenChildDevice={() => handleOpenChildDevice(child)}
+                  onUnlink={() => handleUnlinkChild(child)}
+                  onToggleSOS={() => handleToggleSOS(child)}
+                />
+              ))
+            )}
+          </>
         )}
 
-        {/* Stretch Feature: BLE Pet & Valuable Trackers */}
-        <PetItemSection items={petsItemsList} onRefresh={loadData} />
+        {/* Stretch Feature: BLE Pet & Valuable Trackers (shown if activeTab is 'all' or 'pets') */}
+        {(activeTab === 'all' || activeTab === 'pets') && (
+          <PetItemSection items={petsItemsList} onRefresh={loadData} />
+        )}
       </ScrollView>
 
       {/* Add Child Modal */}
@@ -379,6 +432,38 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: COLORS.textMuted,
     marginTop: 2,
+  },
+  quickCardActive: {
+    borderColor: COLORS.primary,
+    backgroundColor: '#FFF0F0',
+  },
+  tabContainer: {
+    flexDirection: 'row',
+    backgroundColor: '#ECEFF1',
+    borderRadius: RADIUS.md,
+    padding: 4,
+    marginBottom: SPACING.lg,
+    gap: 4,
+  },
+  tabBtn: {
+    flex: 1,
+    paddingVertical: 10,
+    borderRadius: RADIUS.sm,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  tabBtnActive: {
+    backgroundColor: COLORS.card,
+    ...SHADOWS.small,
+  },
+  tabBtnText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textSecondary,
+  },
+  tabBtnTextActive: {
+    color: COLORS.primary,
+    fontWeight: '700',
   },
   loadingBox: {
     paddingVertical: 40,
